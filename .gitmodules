@@ -1,0 +1,3 @@
+[submodule "encapfn"]
+	path = encapfn
+	url = git@github.com:princeton-sns/encapfn.git

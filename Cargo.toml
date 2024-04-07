@@ -88,6 +88,7 @@ members = [
     "chips/swerv",
     "chips/swervolf-eh1",
     "chips/virtio",
+    "encapfn-tock",
     "kernel",
     "libraries/enum_primitive",
     "libraries/riscv-csr",
