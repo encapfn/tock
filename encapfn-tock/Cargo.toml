@@ -8,3 +8,6 @@ edition.workspace = true
 
 [dependencies]
 encapfn = { path = "../encapfn/encapfn" }
+kernel = { path = "../kernel" }
+tock-tbf = { path = "../libraries/tock-tbf" }
+rv32i = { path = "../arch/rv32i" }
