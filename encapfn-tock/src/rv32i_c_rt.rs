@@ -1,14 +1,18 @@
 use core::cell::UnsafeCell;
 use core::ffi::CStr;
 use core::marker::PhantomData;
+use core::mem::MaybeUninit;
 
 use kernel::platform::mpu::{self, MPU};
 
+use encapfn::abi::calling_convention::Stacked;
+use encapfn::abi::calling_convention::{AREG0, AREG1, AREG2, AREG3, AREG4, AREG5, AREG6, AREG7};
 use encapfn::abi::rv32i_c::Rv32iCABI;
 use encapfn::branding::EFID;
+use encapfn::rt::rv32i_c::{Rv32iCBaseRt, Rv32iCInvokeRes, Rv32iCRt};
 use encapfn::rt::EncapfnRt;
 use encapfn::types::{AccessScope, AllocScope, AllocTracker};
-use encapfn::EFError;
+use encapfn::{EFError, EFResult};
 
 use crate::binary::EncapfnBinary;
 
@@ -46,6 +50,127 @@ unsafe impl AllocTracker for TockRv32iCRtAllocTracker<'_> {
                 .checked_add(len)
                 .map(|end| end <= (self.ram_region_start as usize) + self.ram_region_length)
                 .unwrap_or(false))
+    }
+}
+
+#[repr(usize)]
+enum TockRv32iCInvokeErr {
+    NoError,
+    NotCalled,
+}
+
+// Depending on the size of the return value, it will be either passed as a
+// pointer on the stack as the first argument, or be written to a0 and a1. In
+// either case, this InvokeRes type is passed by reference (potentially on the
+// stack), such that we can even encode values that exceed the available two
+// return registers. If a return value was passed by invisible reference, we
+// will be passed a pointer to that:
+#[repr(C)]
+pub struct TockRv32iCInvokeResInner {
+    error: TockRv32iCInvokeErr,
+    a0: usize,
+    a1: usize,
+}
+
+#[repr(C)]
+pub struct TockRv32iCInvokeRes<RT: Rv32iCBaseRt, T> {
+    inner: TockRv32iCInvokeResInner,
+    _t: PhantomData<T>,
+    _rt: PhantomData<RT>,
+}
+
+impl<RT: Rv32iCBaseRt, T> TockRv32iCInvokeRes<RT, T> {
+    fn encode_eferror(&self) -> Result<(), EFError> {
+        match self.inner.error {
+            TockRv32iCInvokeErr::NotCalled => panic!(
+                "Attempted to use / query {} without it being used by an invoke call!",
+                std::any::type_name::<Self>()
+            ),
+
+            TockRv32iCInvokeErr::NoError => Ok(()),
+        }
+    }
+}
+
+unsafe impl<RT: Rv32iCBaseRt, T> Rv32iCInvokeRes<RT, T> for TockRv32iCInvokeRes<RT, T> {
+    fn new() -> Self {
+        // Required invariant by our assembly. The invoke functions require a
+        // reference to this type being passed in, which means that this
+        // assertion is guaranteed to evaluate before any assembly that relies
+        // on this invariant is being run:
+        let _: () = assert!(std::mem::offset_of!(Self, inner) == 0);
+
+        TockRv32iCInvokeRes {
+            inner: TockRv32iCInvokeResInner {
+                error: TockRv32iCInvokeErr::NotCalled,
+                a0: 0,
+                a1: 0,
+            },
+            _t: PhantomData,
+            _rt: PhantomData,
+        }
+    }
+
+    fn into_result_registers(self, _rt: &RT) -> EFResult<T> {
+        self.encode_eferror()?;
+
+        // Basic assumptions in this method:
+        // - sizeof(usize) == sizeof(u64)
+        // - little endian
+        assert!(std::mem::size_of::<usize>() == std::mem::size_of::<u32>());
+        assert!(cfg!(target_endian = "little"));
+
+        // This function must not be called on types larger than two pointers
+        // (64 bit), as those cannot possibly be encoded in the two available
+        // 32-bit return registers:
+        assert!(std::mem::size_of::<T>() <= 2 * std::mem::size_of::<*const ()>());
+
+        // Allocate space to construct the final (unvalidated) T from
+        // the register values. During copy, we treat the memory of T
+        // as integers:
+        let mut ret_uninit: MaybeUninit<T> = MaybeUninit::uninit();
+
+        // TODO: currently, we only support power-of-two return values.
+        // It is not immediately obvious how values that are, e.g.,
+        // 9 byte in size would be encoded into registers.
+        let a0_bytes = u32::to_le_bytes(self.inner.a0 as u32);
+        let a1_bytes = u32::to_le_bytes(self.inner.a1 as u32);
+        let ret_bytes = [
+            a0_bytes[0],
+            a0_bytes[1],
+            a0_bytes[2],
+            a0_bytes[3],
+            a1_bytes[0],
+            a1_bytes[1],
+            a1_bytes[2],
+            a1_bytes[3],
+        ];
+
+        MaybeUninit::write_slice(
+            ret_uninit.as_bytes_mut(),
+            &ret_bytes[..std::mem::size_of::<T>()],
+        );
+
+        EFResult::Ok(ret_uninit.into())
+    }
+
+    unsafe fn into_result_stacked(self, _rt: &RT, stacked_res: *mut T) -> EFResult<T> {
+        self.encode_eferror()?;
+
+        // Allocate space to construct the final (unvalidated) T from
+        // the register values. During copy, we treat the memory of T
+        // as integers:
+        let mut ret_uninit: MaybeUninit<T> = MaybeUninit::uninit();
+
+        // Now, we simply to a memcpy from our pointer. We trust the caller
+        // that is allocated, non-aliased over any Rust struct, not being
+        // mutated and accessible to us. We cast it into a layout-compatible
+        // MaybeUninit pointer:
+        unsafe {
+            std::ptr::copy_nonoverlapping(stacked_res as *const T, ret_uninit.as_mut_ptr(), 1)
+        };
+
+        EFResult::Ok(ret_uninit.into())
     }
 }
 
@@ -236,9 +361,12 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
         // static data `init` will place at the top of memory. We need to set
         // the stack pointer equal to some valid value though, and thus we --
         // for now -- set it to be the top of memory.
+        let ram_region_end = unsafe { ram_region_start.byte_add(ram_region_length) };
+
         let rt = TockRv32iCRt {
             asm_state: TockRv32iCRtAsmState {
-                foreign_stack_ptr: UnsafeCell::new(ram_region_start),
+                foreign_stack_ptr: UnsafeCell::new(ram_region_end),
+                foreign_stack_bottom: ram_region_start,
                 ram_region_start,
                 ram_region_length,
             },
@@ -255,6 +383,8 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
             _id: PhantomData::<ID>,
         };
 
+        rt.init()?;
+
         unimplemented!()
         // Ok((
         //     encapfn,
@@ -270,7 +400,52 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
         // ))
     }
 
-    pub fn init(&self) -> Result<(), ()> {}
+    pub fn init(&self) -> Result<(), ()> {
+        let mut res = TockRv32iCInvokeRes::new();
+
+        self.execute(move || unsafe {
+            Self::foreign_runtime_init(
+                0,
+                0,
+                0,
+                0,
+                0,
+                self as *const _,
+                self.init_addr,
+                &mut res as *mut _,
+            )
+        });
+
+        unimplemented!()
+    }
+
+    #[naked]
+    unsafe extern "C" fn foreign_runtime_init(
+        _a0: usize,
+        _a1: usize,
+        _a2: usize,
+        _a3: usize,
+        _a4: usize,
+        _a5_rt: *const Self,
+        _a6_runtime_init_addr: *const (),
+        _a7_res: *mut TockRv32iCInvokeRes<Self, ()>,
+    ) {
+        core::arch::asm!(
+            "
+                // Load required parameters in non-argument registers and
+                // continue execution in the generic protection-domain
+                // switch routine:
+                mv   t0, a5                 // Load runtime pointer
+                mv   t1, a6                 // Load function pointer
+                mv   t2, a7                 // Load the InvokeRes pointer
+                li   t3, 0                  // Load the stack-spill immediate
+                la   t4, {invoke_sym}       // Load the generic_invoke function
+                j    t4                     // Tail-call into the invoke fn
+            ",
+                invoke_sym = sym Self::generic_invoke,
+                options(noreturn),
+        );
+    }
 
     #[naked]
     unsafe extern "C" fn generic_invoke() {
@@ -295,7 +470,7 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
                 //
                 // The RT::invoke `#[naked]` wrapper functions also load some
                 // const-generic data and other information into a set of
-                // well-defined registers; specifically:
+                // well-defined registers; specifically
                 // - t0: &TockRv32iCRtAsmState
                 // - t1: function pointer to execute
                 // - t2: &mut TockRv32iCRtInvokeResInner
@@ -403,23 +578,23 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
                 addi sp, sp, -40*4  // Move the stack pointer down to make room.
 
                 // Save all registers according to the above memory map:
-                sw   x27, 18*4(sp)
-                sw   x26, 17*4(sp)
-                sw   x25, 16*4(sp)
-                sw   x24, 15*4(sp)
-                sw   x23, 14*4(sp)
-                sw   x22, 13*4(sp)
-                sw   x21, 12*4(sp)
-                sw   x20, 11*4(sp)
-                sw   x19, 10*4(sp)
-                sw   x18,  9*4(sp)
-                sw    x9,  8*4(sp)
-                sw    x8,  7*4(sp)
-                sw    x4,  6*4(sp)
-                sw    x3,  5*4(sp)
-                sw    x7,  4*4(sp)
-                sw    x5,  3*4(sp)
-                sw    x1,  2*4(sp)
+                sw   x27, 18*4(sp)  // s11
+                sw   x26, 17*4(sp)  // s10
+                sw   x25, 16*4(sp)  // s9
+                sw   x24, 15*4(sp)  // s8
+                sw   x23, 14*4(sp)  // s7
+                sw   x22, 13*4(sp)  // s6
+                sw   x21, 12*4(sp)  // s5
+                sw   x20, 11*4(sp)  // s4
+                sw   x19, 10*4(sp)  // s3
+                sw   x18,  9*4(sp)  // s2
+                sw    x9,  8*4(sp)  // s1
+                sw    x8,  7*4(sp)  // s0 / fp
+                sw    x4,  6*4(sp)  // tp
+                sw    x3,  5*4(sp)  // gp
+                sw    x7,  4*4(sp)  // t2
+                sw    x5,  3*4(sp)  // t0
+                sw    x1,  2*4(sp)  // ra
 
                 // At this point, we are free to clobber saved registers. We
                 // embrace using registers like `s0` and `s1`, as they fit into
@@ -482,7 +657,7 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
                 andi  t3, t3, -8
 
               400: // _stack_copy
-                // Copy the stack, implemented as a while (cond) { copy } loop:
+                // Copy the stack, implemented as a `while (cond) copy; loop`
                 beq   t3, x0, 500f  // If to copy == 0, jump to _stack_copied
                 lw    s2, 0(t5)     // Load a word from our original stack
                 sw    s2, 0(s1)     // Store it onto fsp'
@@ -491,7 +666,7 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
                 addi  t3, t3, -4    // to copy     -= 4 (one word)
                 j     400b          // loop!
 
-              500f: // _stack_copied
+              500: // _stack_copied
                 // From here on we can't allow the CPU to take interrupts
                 // anymore, as we re-route traps to `_start_ef_trap` below (by
                 // writing our stack pointer into the mscratch CSR), and we rely
@@ -541,7 +716,7 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
 
                 // All other argument registers have not been clobbered so far.
                 // Set our return address to the return springboard:
-                la    ra, {ret_springboard)
+                la    ra, {ret_springboard_sym}
 
                 // Clear all Rust state that the function should not have access
                 // to. This is not strictly necessary under all threat models,
@@ -689,197 +864,112 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
 
               700: // _start_ef_trap_continue
                 // This was not an interrupt. We need to extract all required
-                // information, restore kernel state, and then hand off to a
-                // final Rust function that encodes the return value.
+                // information, restore the kernel trap handler, kernel state,
+                // and then hand off to a final Rust function that encodes the
+                // return value into the provided
+                // `&mut TockRv32iCRtInvokeResInner`. Instead of calling this
+                // function through a branch, jump, or jump and link (which
+                // would be wrong, since we require a tail-call), we use the
+                // return from the trap handler to implement this call. This
+                // also guarantees atomicity of the CSRs we read, as traps are
+                // non-reentrant.
 
-                // Restore all TODO!
+                // Restore the kernel trap handler. `mscratch` currently
+                // contains the function's s0, which we don't need to save.
+                // Hence discard it.
+                csrw  mscratch, zero
 
-                lw   s1, 2*4(s0)
+                // Need to set mstatus.MPP to 0b11 so that we stay in machine
+                // mode upon returning from this interrupt context.
+                //
+                // We use `a2` as a scratch register, as we are allowed to
+                // clobber it here, and it fits into a compressed load
+                // instruction.
+                //
+                li    a2, 0x1800    // Load 0b11 to the MPP bits location in a2
+                csrs  mstatus, a2   // mstatus |= a2
 
-              // With the per-process stored state address in `t1`, save all
-              // non-clobbered registers:
-              //
-              sw    x1,  0*4(s1)        // ra
-              sw    x2,  1*4(s1)        // sp
-              sw    x3,  2*4(s1)        // gp
-              sw    x4,  3*4(s1)        // tp
-              sw    x5,  4*4(s1)        // t0
-              sw    x6,  5*4(s1)        // t1
-              sw    x7,  6*4(s1)        // t2
-              // ------------------------> s0, in mscratch right now
-              // ------------------------> s1, stored at 0*4(s0) right now
-              sw   x10,  9*4(s1)        // a0
-              sw   x11, 10*4(s1)        // a1
-              sw   x12, 11*4(s1)        // a2
-              sw   x13, 12*4(s1)        // a3
-              sw   x14, 13*4(s1)        // a4
-              sw   x15, 14*4(s1)        // a5
-              sw   x16, 15*4(s1)        // a6
-              sw   x17, 16*4(s1)        // a7
-              sw   x18, 17*4(s1)        // s2
-              sw   x19, 18*4(s1)        // s3
-              sw   x20, 19*4(s1)        // s4
-              sw   x21, 20*4(s1)        // s5
-              sw   x22, 21*4(s1)        // s6
-              sw   x23, 22*4(s1)        // s7
-              sw   x24, 23*4(s1)        // s8
-              sw   x25, 24*4(s1)        // s9
-              sw   x26, 25*4(s1)        // s10
-              sw   x27, 26*4(s1)        // s11
-              sw   x28, 27*4(s1)        // t3
-              sw   x29, 28*4(s1)        // t4
-              sw   x30, 29*4(s1)        // t5
-              sw   x31, 30*4(s1)        // t6
+                // In addition to the trap handler's clobbers (namely swapping
+                // the function's s0 into mscratch, restoring our stack pointer
+                // into s0, and saving the function's s1 onto 0*4(s0)), we also
+                // have the mcause CSR loaded into `s1`. We move it into `a5`,
+                // as expected by the function encoding the return register.
+                mv   a5, s1         // a5 = s1 (mcause, as loaded above)
 
-              // At this point, we can restore s0 into our stack pointer:
-              mv   sp, s0
+                // We restore our `sp`. We want to keep the function's `sp` for
+                // diagnostics purposes, and thus store it into `a5` (to be
+                // passed to the function encoding the return value).
+                mv    a4, sp        // a4 = foreign stack pointer
+                mv    sp, s0        // sp = Rust stack pointer, from mscratch
 
-              // Now retrieve the original value of s1 and save that as well. We
-              // must not clobber s1, our per-process stored state pointer.
-              lw   s0,  0*4(sp)         // s0 = app s1 (from trap handler scratch space)
-              sw   s0,  8*4(s1)         // Save app s1 to per-process state
+                // Load the remaining CSRs to be passed as an argument, `mtval`:
+                csrr  a6, mtval     // a6 = mtval CSR
 
-              // Retrieve the original value of s0 from the mscratch CSR, save it.
-              //
-              // This will also restore the kernel trap handler by writing zero to
-              // the CSR. `csrrw` allows us to read and write the CSR in a single
-              // instruction:
-              csrrw s0, mscratch, zero  // s0 <- mscratch[app s0] <- zero
-              sw    s0, 7*4(s1)         // Save app s0 to per-process state
+                // And `mepc`. For `mepc`, also load the address of the
+                // return-value encoding function, to perform a tail-call by
+                // returning from the interrupt context:
+                la    a7, {encode_ret_sym}
+                csrrw a7, mepc, a7
 
-              // -------------------------------------------------------------------
-              // At this point, the entire app register file is saved. We also
-              // restored the kernel trap handler. We have restored the following
-              // kernel registers:
-              //
-              // - sp: kernel stack pointer
-              // - s1: per-process stored state pointer
-              //
-              // We avoid clobbering those registers from this point onward.
-              // -------------------------------------------------------------------
+                // Pass the runtime and invoke res pointers as arguments:
+                lw    a2,  3*4(sp)  // a2 (&TockRv32iCRtAsmState, was t0)
+                lw    a3,  4*4(sp)  // a3 (&mut TockRv32iCRtInvokeResInner, was t2)
 
-              // We also need to store some other information about the trap reason,
-              // present in CSRs:
-              //
-              // - the app's PC (mepc),
-              // - the trap reason (mcause),
-              // - the trap 'value' (mtval, e.g., faulting address).
-              //
-              // We need to store mcause because we use that to determine why the
-              // app stopped executing and returned to the kernel. We store mepc
-              // because it is where we need to return to in the app at some
-              // point. We need to store mtval in case the app faulted and we need
-              // mtval to help with debugging.
-              //
-              // We use `s0` as a scratch register, as it fits into the 3-bit
-              // register argument of RISC-V compressed loads / stores:
+                // Restore the return address, for our tail-call:
+                lw    ra,  2*4(sp)  // ra
 
-              // Save the PC to the stored state struct. We also load the address
-              // of _return_to_kernel into it, as this will be where we jump on
-              // the mret instruction, which leaves the trap handler.
-              la    s0, 300f            // Load _return_to_kernel into t0.
-              csrrw s0, mepc, s0        // s0 <- mepc[app pc] <- _return_to_kernel
-              sw    s0, 31*4(s1)        // Store app's pc in stored state struct.
+                // Restore all other caller-saved kernel registers:
+                lw    x3,  5*4(sp)  // gp
+                lw    x4,  6*4(sp)  // tp
+                lw    x8,  7*4(sp)  // s0 / fp
+                lw    x9,  8*4(sp)  // s1
+                lw   x18,  9*4(sp)  // s2
+                lw   x19, 10*4(sp)  // s3
+                lw   x20, 11*4(sp)  // s4
+                lw   x21, 12*4(sp)  // s5
+                lw   x22, 13*4(sp)  // s6
+                lw   x23, 14*4(sp)  // s7
+                lw   x24, 15*4(sp)  // s8
+                lw   x25, 16*4(sp)  // s9
+                lw   x26, 17*4(sp)  // s10
+                lw   x27, 18*4(sp)  // s11
 
-              // Save mtval to the stored state struct
-              csrr  s0, mtval
-              sw    s0, 33*4(s1)
+                // The two proper return registers (a0 and a1) say unmodified
+                // and are passed through to the tail-call function:
+                // mv a0, a0        // pass a0, nop
+                // mv a0, a0        // pass a1, nop
 
-              // Save mcause and leave it loaded into a0, as we call a function
-              // with it below:
-              csrr  a0, mcause
-              sw    a0, 32*4(s1)
+                addi sp, sp, 40*4   // Reset kernel stack pointer
 
-              // Depending on the value of a0, we might be calling into a function
-              // while still in the trap handler. The callee may rely on the `gp`,
-              // `tp`, and `fp` (s0) registers to be set correctly. Thus we restore
-              // them here, as we need to do anyways. They are saved registers,
-              // and so we avoid clobbering them beyond this point.
-              //
-              // We do not restore `s1`, as we need to move it back into `a0`
-              // _after_ potentially invoking the _disable_interrupt_... function.
-              // LLVM relies on it to not be clobbered internally, but it is not
-              // part of the RISC-V C ABI, which we need to follow here.
-              //
-              lw    x8, 5*4(sp)         // fp/s0: Restore the frame pointer
-              lw    x4, 4*4(sp)         // tp: Restore the thread pointer
-              lw    x3, 3*4(sp)         // gp: Restore the global pointer
+                // Return from the trap handler, re-entering machine mode and
+                // continuing execution at the tail-called function to encode
+                // the return value.
+                mret
 
-              // --------------------------------------------------------------------
-              // From this point onward, avoid clobbering the following registers:
-              //
-              // - x2 / sp: kernel stack pointer
-              // - x3 / gp: kernel global pointer
-              // - x4 / tp: kernel thread pointer
-              // - x8 / s0 / fp: kernel frame pointer
-              // - x9 / s1: per-process stored state pointer
-              //
-              // --------------------------------------------------------------------
-
-              // Now we need to check if this was an interrupt, and if it was,
-              // then we need to disable the interrupt before returning from this
-              // trap handler so that it does not fire again.
-              //
-              // If mcause is greater than or equal to zero this was not an
-              // interrupt (i.e. the most significant bit is not 1). In this case,
-              // jump to _start_app_trap_continue.
-              bge   a0, zero, 200f
-
-              // This was an interrupt. Call the interrupt disable function, with
-              // mcause already loaded in a0.
-              //
-              // This may clobber all caller-saved registers. However, at this
-              // stage, we only restored `sp`, `s1`, and the registers above, all of
-              // which are saved. Thus we don't have to worry about the function
-              // call clobbering these registers.
-              //
-              jal  ra, _disable_interrupt_trap_rust_from_app
-
-            200: // _start_app_trap_continue
-
-              // Need to set mstatus.MPP to 0b11 so that we stay in machine mode.
-              //
-              // We use `a0` as a scratch register, as we are allowed to clobber it
-              // here, and it fits into a compressed load instruction. We must avoid
-              // using restored saved registers like `s0`, etc.
-              //
-              li    a0, 0x1800          // Load 0b11 to the MPP bits location in a0
-              csrs  mstatus, a0         // mstatus |= a0
-
-              // Use mret to exit the trap handler and return to the context
-              // switching code. We loaded the address of _return_to_kernel
-              // into mepc above.
-              mret
-
-              // This is where the trap handler jumps back to after the app stops
-              // executing.
-            300: // _return_to_kernel
-
-              // We have already stored the app registers in the trap handler. We
-              // have further restored `gp`, `tp`, `fp`/`s0` and the stack pointer.
-              //
-              // The only other non-clobbered registers are `s1` and `a0`, where
-              // `a0` needs to hold the per-process state pointer currently stored
-              // in `s1`, and the original value of `s1` is saved on the stack.
-              // Restore them:
-              //
-              mv    a0, s1              // a0 = per-process stored state
-              lw    s1, 6*4(sp)         // restore s1 (used by LLVM internally)
-
-              // We need thus need to mark all registers as clobbered, except:
-              //
-              // - x2  (sp)
-              // - x3  (gp)
-              // - x4  (tp)
-              // - x8  (fp)
-              // - x9  (s1)
-              // - x10 (a0)
-
-              addi sp, sp, 8*4   // Reset kernel stack pointer
             ",
-            ret_springboard = sym ef_tock_rv32i_c_rt_ret_springboard,
-            cb_springboard = sym ef_tock_rv32i_c_rt_cb_springboard,
+        // Function & springboard symbols:
+            ret_springboard_sym = sym ef_tock_rv32i_c_rt_ret_springboard,
+        encode_ret_sym = sym Self::encode_return,
+        // Runtime ASM state offsets:
+        rtas_foreign_stack_ptr_offset = const std::mem::offset_of!(TockRv32iCRtAsmState, foreign_stack_ptr),
+            rtas_foreign_stack_bottom_offset = const std::mem::offset_of!(TockRv32iCRtAsmState, foreign_stack_bottom),
             options(noreturn),
+        );
+    }
+
+    extern "C" fn encode_return(
+        a0: usize,
+        a1: usize,
+        a2_rt: &Self,
+        a3_invoke_res: &mut TockRv32iCInvokeResInner,
+        a4_fsp: *const (),
+        a5_mcause: usize,
+        a6_mtval: usize,
+        a7_mepc: usize,
+    ) {
+        panic!(
+            "Encode return: {:08x} {:08x} {:p} {:p} {:p} {:08x} {:08x} {:08x}",
+            a0, a1, a2_rt, a3_invoke_res, a4_fsp, a5_mcause, a6_mtval, a7_mepc,
         );
     }
 }
@@ -945,6 +1035,109 @@ unsafe impl<ID: EFID, M: MPU + 'static> EncapfnRt for TockRv32iCRt<ID, M> {
             fun(ptr, alloc_scope)
         })
     }
+}
+
+macro_rules! invoke_impl_rtloc_register {
+    ($regtype:ident, $rtloc:expr, $fnptrloc:expr, $resptrloc:expr) => {
+        impl<ID: EFID, M: MPU + 'static> Rv32iCRt<0, $regtype<Rv32iCABI>> for TockRv32iCRt<ID, M> {
+            #[naked]
+            unsafe extern "C" fn invoke() {
+                core::arch::asm!(
+                    concat!("
+                    // Load required parameters in non-argument registers and
+                    // continue execution in the generic protection-domain
+                    // switch routine:
+                    mv   t0, ", $rtloc, "       // Load runtime pointer
+                    mv   t1, ", $fnptrloc, "    // Load function pointer
+                    mv   t2, ", $resptrloc, "   // Load the InvokeRes pointer
+                    li   t3, 0                  // Load the stack-spill immediate
+                    la   t4, {invoke_sym}       // Load the generic_invoke function
+                    j    t4                     // Tail-call into the invoke fn
+                    "),
+                    invoke_sym = sym Self::generic_invoke,
+                    options(noreturn),
+               );
+            }
+        }
+    };
+}
+
+invoke_impl_rtloc_register!(AREG0, "a0", "a1", "a2");
+invoke_impl_rtloc_register!(AREG1, "a1", "a2", "a3");
+invoke_impl_rtloc_register!(AREG2, "a2", "a3", "a4");
+invoke_impl_rtloc_register!(AREG3, "a3", "a4", "a4");
+invoke_impl_rtloc_register!(AREG4, "a4", "a5", "a6");
+invoke_impl_rtloc_register!(AREG5, "a5", "a6", "a7");
+
+impl<ID: EFID, M: MPU + 'static> Rv32iCRt<0, AREG6<Rv32iCABI>> for TockRv32iCRt<ID, M> {
+    #[naked]
+    unsafe extern "C" fn invoke() {
+        core::arch::asm!(
+             concat!("
+            // Load required parameters in non-argument registers and
+            // continue execution in the generic protection-domain
+            // switch routine:
+            mv   t0, a6                 // Load runtime pointer
+            mv   t1, a7                 // Load function pointer
+            lw   t2, 0*4(sp)            // Load the InvokeRes pointer
+            li   t3, 0                  // Load the stack-spill immediate
+            la   t4, {invoke_sym}       // Load the generic_invoke function
+            j    t4                     // Tail-call into the invoke fn
+            "),
+             invoke_sym = sym Self::generic_invoke,
+             options(noreturn),
+        );
+    }
+}
+
+impl<ID: EFID, M: MPU + 'static> Rv32iCRt<0, AREG7<Rv32iCABI>> for TockRv32iCRt<ID, M> {
+    #[naked]
+    unsafe extern "C" fn invoke() {
+        core::arch::asm!(
+             concat!("
+            // Load required parameters in non-argument registers and
+            // continue execution in the generic protection-domain
+            // switch routine:
+            mv   t0, a7                 // Load runtime pointer
+            mv   t1, 0*4(sp)            // Load function pointer
+            lw   t2, 4*4(sp)            // Load the InvokeRes pointer
+            li   t3, 0                  // Load the stack-spill immediate
+            la   t4, {invoke_sym}       // Load the generic_invoke function
+            j    t4                     // Tail-call into the invoke fn
+            "),
+             invoke_sym = sym Self::generic_invoke,
+             options(noreturn),
+        );
+    }
+}
+
+impl<const STACK_SPILL: usize, const RT_STACK_OFFSET: usize, ID: EFID, M: MPU + 'static>
+    Rv32iCRt<STACK_SPILL, Stacked<RT_STACK_OFFSET, Rv32iCABI>> for TockRv32iCRt<ID, M>
+{
+    #[naked]
+    unsafe extern "C" fn invoke() {
+        core::arch::asm!(
+            "
+            // Load required parameters in non-argument registers and
+            // continue execution in the generic protection-domain
+            // switch routine:
+            lw   t0, ({rt_off} + 0)(sp) // Load runtime pointer
+            mv   t1, ({rt_off} + 4)(sp) // Load function pointer
+            lw   t2, ({rt_off} + 8)(sp) // Load the InvokeRes pointer
+            li   t3, {stack_spill}      // Copy the stack-spill immediate
+            la   t4, {invoke_sym}       // Load the generic_invoke function
+            j    t4                     // Tail-call into the invoke fn
+            ",
+            stack_spill = const STACK_SPILL,
+            rt_off = const RT_STACK_OFFSET,
+            invoke_sym = sym Self::generic_invoke,
+            options(noreturn),
+        );
+    }
+}
+
+impl<ID: EFID, M: MPU + 'static> Rv32iCBaseRt for TockRv32iCRt<ID, M> {
+    type InvokeRes<T> = TockRv32iCInvokeRes<Self, T>;
 }
 
 extern "C" {
