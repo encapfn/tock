@@ -14,7 +14,8 @@ MEMORY
 {
   rom (rx)  : ORIGIN = 0x80000000, LENGTH = 0x100000
   prog (rx) : ORIGIN = 0x80100000, LENGTH = 0x100000
-  ram (rwx) : ORIGIN = 0x80200000, LENGTH = 0x200000
+  ram (rwx) : ORIGIN = 0x80200000, LENGTH = 0x100000
+  efram (rwx) : ORIGIN = 0x80300000, LENGTH = 0x100000
 }
 
 SECTIONS {
@@ -28,6 +29,9 @@ SECTIONS {
 
     _ssram  = ORIGIN(ram);
     _esram  = ORIGIN(ram) + LENGTH(ram);
+
+    _efram_start = ORIGIN(efram);
+    _efram_end = ORIGIN(efram) + LENGTH(efram);
 }
 
 INCLUDE ../kernel_layout.ld

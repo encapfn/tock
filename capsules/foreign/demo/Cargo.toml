@@ -1,0 +1,16 @@
+[package]
+name = "demo"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+bindgen = { path = "../../../encapfn/rust-bindgen/bindgen" }
+cc = "1.0.90"
+
+[dependencies]
+kernel = { path = "../../../kernel" }
+encapfn = { path = "../../../encapfn/encapfn", default-features = false, features = [ "mockrt_vla_alloc" ] }
+

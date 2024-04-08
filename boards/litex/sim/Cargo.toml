@@ -17,3 +17,7 @@ litex_vexriscv = { path = "../../../chips/litex_vexriscv" }
 
 capsules-core = { path = "../../../capsules/core" }
 capsules-extra = { path = "../../../capsules/extra" }
+
+encapfn = { path = "../../../encapfn/encapfn", default-features = false, features = [ "mockrt_vla_alloc" ] }
+encapfn-tock = { path = "../../../encapfn-tock" }
+demo = { path = "../../../capsules/foreign/demo" }

@@ -18,3 +18,7 @@ qemu_rv32_virt_chip = { path = "../../chips/qemu_rv32_virt_chip" }
 
 capsules-core = { path = "../../capsules/core" }
 capsules-extra = { path = "../../capsules/extra" }
+
+encapfn = { path = "../../encapfn/encapfn", default-features = false, features = [ "mockrt_vla_alloc" ] }
+encapfn-tock = { path = "../../encapfn-tock" }
+demo = { path = "../../capsules/foreign/demo" }

@@ -172,6 +172,11 @@ pub unsafe fn main() {
         /// The end of the kernel / app RAM (Included only for kernel PMP)
         static _esram: u8;
     }
+    // These symbols are defined in the linker script.
+    extern "C" {
+        static mut _efram_start: u8;
+        static mut _efram_end: u8;
+    }
 
     // ---------- BASIC INITIALIZATION -----------
 
@@ -192,7 +197,7 @@ pub unsafe fn main() {
         rv32i::pmp::kernel_protection_mml_epmp::RAMRegion(
             rv32i::pmp::NAPOTRegionSpec::new(
                 core::ptr::addr_of!(_ssram),
-                core::ptr::addr_of!(_esram) as usize - core::ptr::addr_of!(_ssram) as usize,
+                core::ptr::addr_of!(_efram_end) as usize - core::ptr::addr_of!(_ssram) as usize,
             )
             .unwrap(),
         ),
@@ -526,6 +531,52 @@ pub unsafe fn main() {
 
     // Start the process console:
     let _ = platform.pconsole.start();
+
+    encapfn::branding::new(|brand| {
+        // This is unsafe, as it instantiates a runtime that can be used to run
+        // foreign functions without memory protection:
+        let (rt, mut alloc, mut access) = unsafe { encapfn::rt::mock::MockRt::new(false, brand) };
+
+        // Create a "bound" runtime, which implements the LibDemo API:
+        let bound_rt = demo::libdemo::LibDemoRt::new(&rt).unwrap();
+
+        // Run a test:
+        demo::test_libdemo(&bound_rt, &mut alloc, &mut access);
+        debug!("Ran test_libdemo with the MockRt!");
+    });
+
+    encapfn::branding::new(|brand| {
+        // Try to load the efdemo Encapsulated Functions TBF binary:
+        let efdemo_binary = encapfn_tock::binary::EncapfnBinary::find(
+            "efdemo",
+            core::slice::from_raw_parts(
+                &_sapps as *const u8,
+                &_eapps as *const u8 as usize - &_sapps as *const u8 as usize,
+            ),
+        )
+        .unwrap();
+
+        // This is unsafe, as it instantiates a runtime that can be used to run
+        // foreign functions without memory protection:
+        let (rt, mut alloc, mut access) = unsafe {
+            encapfn_tock::rv32i_c_rt::TockRv32iCRt::new(
+                kernel::platform::chip::Chip::mpu(chip),
+                efdemo_binary,
+                core::ptr::addr_of_mut!(_efram_start) as *mut (),
+                core::ptr::addr_of!(_efram_end) as usize
+                    - core::ptr::addr_of!(_efram_start) as usize,
+                brand,
+            )
+        }
+        .unwrap();
+
+        // Create a "bound" runtime, which implements the LibDemo API:
+        let bound_rt = demo::libdemo::LibDemoRt::new(&rt).unwrap();
+
+        // Run a test:
+        demo::test_libdemo(&bound_rt, &mut alloc, &mut access);
+        debug!("Ran test_libdemo with the Rv32iCRt!");
+    });
 
     debug!("QEMU RISC-V 32-bit \"virt\" machine, initialization complete.");
     debug!("Entering main loop.");
