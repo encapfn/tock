@@ -1050,7 +1050,11 @@ unsafe impl<ID: EFID, M: MPU + 'static> EncapfnRt for TockRv32iCRt<ID, M> {
         index: usize,
         _symtabstate: &Self::SymbolTableState<SYMTAB_SIZE, FIXED_OFFSET_SYMTAB_SIZE>,
     ) -> Option<*const ()> {
-        Some(unsafe { *(self.fntab_addr as *const *const ()).add(index) })
+        if index < self.fntab_length {
+            Some(unsafe { *(self.fntab_addr as *const *const ()).add(index) })
+        } else {
+            None
+        }
     }
 
     fn execute<R, F: FnOnce() -> R>(&self, f: F) -> R {
