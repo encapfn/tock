@@ -1,4 +1,4 @@
-use core::cell::UnsafeCell;
+use core::cell::{Cell, UnsafeCell};
 use core::ffi::CStr;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
@@ -11,17 +11,18 @@ use encapfn::abi::rv32i_c::Rv32iCABI;
 use encapfn::branding::EFID;
 use encapfn::rt::rv32i_c::{Rv32iCBaseRt, Rv32iCInvokeRes, Rv32iCRt};
 use encapfn::rt::EncapfnRt;
-use encapfn::types::{AccessScope, AllocScope, AllocTracker};
+use encapfn::types::{AccessScope, AllocScope, AllocTracker, EFCopy};
 use encapfn::{EFError, EFResult};
 
 use crate::binary::EncapfnBinary;
 
-pub const ENCAPFN_HEADER_MAGIC_OFFSET: usize = 0;
-pub const ENCAPFN_HEADER_RTHDR_PTR_OFFSET: usize = 4;
-pub const ENCAPFN_HEADER_INIT_PTR_OFFSET: usize = 8;
-pub const ENCAPFN_HEADER_FNTAB_PTR_OFFSET: usize = 12;
-pub const ENCAPFN_HEADER_FNTAB_LEN_OFFSET: usize = 16;
-pub const ENCAPFN_HEADER_LEN: usize = 20;
+// Word offsets:
+pub const ENCAPFN_HEADER_MAGIC_WOFFSET: usize = 0;
+pub const ENCAPFN_HEADER_RTHDR_PTR_WOFFSET: usize = 1;
+pub const ENCAPFN_HEADER_INIT_PTR_WOFFSET: usize = 2;
+pub const ENCAPFN_HEADER_FNTAB_PTR_WOFFSET: usize = 3;
+pub const ENCAPFN_HEADER_FNTAB_LEN_WOFFSET: usize = 4;
+pub const ENCAPFN_HEADER_WLEN: usize = 5;
 pub const ENCAPFN_HEADER_MAGIC: u32 = 0x454E4350;
 
 #[derive(Clone, Debug)]
@@ -70,6 +71,7 @@ pub struct TockRv32iCInvokeResInner {
     error: TockRv32iCInvokeErr,
     a0: usize,
     a1: usize,
+    sp: *const (),
 }
 
 #[repr(C)]
@@ -84,7 +86,7 @@ impl<RT: Rv32iCBaseRt, T> TockRv32iCInvokeRes<RT, T> {
         match self.inner.error {
             TockRv32iCInvokeErr::NotCalled => panic!(
                 "Attempted to use / query {} without it being used by an invoke call!",
-                std::any::type_name::<Self>()
+                core::any::type_name::<Self>()
             ),
 
             TockRv32iCInvokeErr::NoError => Ok(()),
@@ -98,13 +100,14 @@ unsafe impl<RT: Rv32iCBaseRt, T> Rv32iCInvokeRes<RT, T> for TockRv32iCInvokeRes<
         // reference to this type being passed in, which means that this
         // assertion is guaranteed to evaluate before any assembly that relies
         // on this invariant is being run:
-        let _: () = assert!(std::mem::offset_of!(Self, inner) == 0);
+        let _: () = assert!(core::mem::offset_of!(Self, inner) == 0);
 
         TockRv32iCInvokeRes {
             inner: TockRv32iCInvokeResInner {
                 error: TockRv32iCInvokeErr::NotCalled,
                 a0: 0,
                 a1: 0,
+                sp: core::ptr::null(),
             },
             _t: PhantomData,
             _rt: PhantomData,
@@ -117,13 +120,13 @@ unsafe impl<RT: Rv32iCBaseRt, T> Rv32iCInvokeRes<RT, T> for TockRv32iCInvokeRes<
         // Basic assumptions in this method:
         // - sizeof(usize) == sizeof(u64)
         // - little endian
-        assert!(std::mem::size_of::<usize>() == std::mem::size_of::<u32>());
+        assert!(core::mem::size_of::<usize>() == core::mem::size_of::<u32>());
         assert!(cfg!(target_endian = "little"));
 
         // This function must not be called on types larger than two pointers
         // (64 bit), as those cannot possibly be encoded in the two available
         // 32-bit return registers:
-        assert!(std::mem::size_of::<T>() <= 2 * std::mem::size_of::<*const ()>());
+        assert!(core::mem::size_of::<T>() <= 2 * core::mem::size_of::<*const ()>());
 
         // Allocate space to construct the final (unvalidated) T from
         // the register values. During copy, we treat the memory of T
@@ -148,7 +151,7 @@ unsafe impl<RT: Rv32iCBaseRt, T> Rv32iCInvokeRes<RT, T> for TockRv32iCInvokeRes<
 
         MaybeUninit::write_slice(
             ret_uninit.as_bytes_mut(),
-            &ret_bytes[..std::mem::size_of::<T>()],
+            &ret_bytes[..core::mem::size_of::<T>()],
         );
 
         EFResult::Ok(ret_uninit.into())
@@ -167,7 +170,7 @@ unsafe impl<RT: Rv32iCBaseRt, T> Rv32iCInvokeRes<RT, T> for TockRv32iCInvokeRes<
         // mutated and accessible to us. We cast it into a layout-compatible
         // MaybeUninit pointer:
         unsafe {
-            std::ptr::copy_nonoverlapping(stacked_res as *const T, ret_uninit.as_mut_ptr(), 1)
+            core::ptr::copy_nonoverlapping(stacked_res as *const T, ret_uninit.as_mut_ptr(), 1)
         };
 
         EFResult::Ok(ret_uninit.into())
@@ -178,7 +181,7 @@ unsafe impl<RT: Rv32iCBaseRt, T> Rv32iCInvokeRes<RT, T> for TockRv32iCInvokeRes<
 pub struct TockRv32iCRtAsmState {
     // Foreign stack pointer, read by the protection-domain switch assembly
     // and used as a base to copy stacked arguments & continue execution from:
-    foreign_stack_ptr: UnsafeCell<*mut ()>,
+    foreign_stack_ptr: Cell<*mut ()>,
 
     // Foreign stack bottom (inclusive). Last usable stack address:
     foreign_stack_bottom: *mut (),
@@ -227,7 +230,7 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
             AllocScope<'static, TockRv32iCRtAllocTracker<'static>, ID>,
             AccessScope<ID>,
         ),
-        (),
+        EFError,
     > {
         // See the TockRv32iCRt type definition for an explanation of this
         // const assertion. It is required to allow us to index into fields
@@ -278,65 +281,65 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
         // available with read-execute permissions.
 
         // Make sure we have at least enough data to parse the header:
-        if binary.binary_length < ENCAPFN_HEADER_LEN {
-            return Err(());
+        if binary.binary_length < ENCAPFN_HEADER_WLEN * core::mem::size_of::<u32>() {
+            // TODO: more descriptive error
+            return Err(EFError::InternalError);
         }
+
+        // We require the Encapsulated Functions header to be aligned to a
+        // word-boundary, such that we can create a u32-slice to it and support
+        // efficient loads.
+        assert!(binary.binary_start as usize % core::mem::size_of::<u32>() == 0);
 
         // We generally try to avoid retaining Rust slices to the containerized
         // service binary (to avoid unsoundness, in case this memory should
         // change). However, for parsing the header, we can create an ephemeral
         // slice given that we verified the length:
         let header_slice =
-            core::slice::from_raw_parts(binary.binary_start as *const u8, ENCAPFN_HEADER_LEN);
-
-        // We don't rely on the header to be well aligned here. Read fields
-        // byte-by-byte. TODO: check that we meet or enforce alignment
-        // constraints for other accesses too!
-        #[inline(always)]
-        fn extract_header_word(header_slice: &[u8], offset: usize) -> u32 {
-            let word_slice = &header_slice[offset..offset + core::mem::size_of::<u32>()];
-            u32::from_ne_bytes([word_slice[0], word_slice[1], word_slice[2], word_slice[3]])
-        }
+            core::slice::from_raw_parts(binary.binary_start as *const u32, ENCAPFN_HEADER_WLEN);
 
         // Read the header fields in native endianness. First, check the magic:
-        if extract_header_word(header_slice, ENCAPFN_HEADER_MAGIC_OFFSET) != ENCAPFN_HEADER_MAGIC {
-            return Err(());
+        if header_slice[ENCAPFN_HEADER_MAGIC_WOFFSET] != ENCAPFN_HEADER_MAGIC {
+            return Err(EFError::InternalError);
         }
 
         // Extract the runtime header pointer and ensure that it is fully
         // contained in contained within the binary:
-        let rthdr_offset =
-            extract_header_word(header_slice, ENCAPFN_HEADER_RTHDR_PTR_OFFSET) as usize;
+        let rthdr_offset = header_slice[ENCAPFN_HEADER_RTHDR_PTR_WOFFSET] as usize;
         if rthdr_offset > binary.binary_length - core::mem::size_of::<u32>() {
-            return Err(());
+            // TODO: more descriptive error
+            return Err(EFError::InternalError);
         }
         let rthdr_addr = unsafe { binary.binary_start.byte_add(rthdr_offset) };
+        assert!(rthdr_addr as usize % core::mem::size_of::<u32>() == 0);
 
         // Extract the init function pointer pointer and ensure that it is fully
         // contained in contained within the binary:
-        let init_offset =
-            extract_header_word(header_slice, ENCAPFN_HEADER_INIT_PTR_OFFSET) as usize;
+        let init_offset = header_slice[ENCAPFN_HEADER_INIT_PTR_WOFFSET] as usize;
         if init_offset > binary.binary_length - core::mem::size_of::<u32>() {
-            return Err(());
+            return Err(EFError::InternalError);
         }
+
+        // May be a compressed instruction, in which case it'll be aligned on a
+        // 2-byte boundary:
         let init_addr = unsafe { binary.binary_start.byte_add(init_offset) };
+        assert!(init_addr as usize % core::mem::size_of::<u16>() == 0);
 
         // Extract the function table pointer and ensure that it is fully
         // contained in contained within the binary:
-        let fntab_offset =
-            extract_header_word(header_slice, ENCAPFN_HEADER_FNTAB_PTR_OFFSET) as usize;
-        let fntab_length =
-            extract_header_word(header_slice, ENCAPFN_HEADER_FNTAB_LEN_OFFSET) as usize;
+        let fntab_offset = header_slice[ENCAPFN_HEADER_FNTAB_PTR_WOFFSET] as usize;
+        let fntab_length = header_slice[ENCAPFN_HEADER_FNTAB_LEN_WOFFSET] as usize;
         if fntab_offset + (fntab_length * core::mem::size_of::<*const ()>())
             > binary.binary_length - core::mem::size_of::<u32>()
         {
-            return Err(());
+            return Err(EFError::InternalError);
         }
         let fntab_addr = unsafe { binary.binary_start.byte_add(fntab_offset) };
+        assert!(fntab_addr as usize % core::mem::size_of::<u32>() == 0);
 
         // Create an MPU configuration that sets up appropriate permissions for
         // the Encapsulated Functions binary:
-        let mut mpu_config = mpu.new_config().ok_or(())?;
+        let mut mpu_config = mpu.new_config().ok_or(EFError::InternalError)?;
 
         mpu.allocate_region(
             binary.binary_start as *const u8,
@@ -360,12 +363,12 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
         // `foreign_stack_top` should be placed -- that will depend on how much
         // static data `init` will place at the top of memory. We need to set
         // the stack pointer equal to some valid value though, and thus we --
-        // for now -- set it to be the top of memory.
+        // for now -- set it to be nthe top of memory.
         let ram_region_end = unsafe { ram_region_start.byte_add(ram_region_length) };
 
         let rt = TockRv32iCRt {
             asm_state: TockRv32iCRtAsmState {
-                foreign_stack_ptr: UnsafeCell::new(ram_region_end),
+                foreign_stack_ptr: Cell::new(ram_region_end),
                 foreign_stack_bottom: ram_region_start,
                 ram_region_start,
                 ram_region_length,
@@ -385,27 +388,27 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
 
         rt.init()?;
 
-        unimplemented!()
-        // Ok((
-        //     encapfn,
-        //     unsafe {
-        //         AllocScope::new(EncapfnTockRv32iCRtAllocTracker {
-        //             ram_region_start: ram_region_start,
-        //             ram_region_len: ram_region_len,
-        // 	    flash_region_start: flash_region_start,
-        // 	    flash_region_end: flash_region_end,
-        //         })
-        //     },
-        //     unsafe { AccessScope::new() },
-        // ))
+        Ok((
+            rt,
+            unsafe {
+                AllocScope::new(TockRv32iCRtAllocTracker {
+                    ram_region_start,
+                    ram_region_length,
+                    flash_region_start: binary.binary_start as *const _ as *mut (),
+                    flash_region_length: binary.binary_length,
+                    _lt: PhantomData,
+                })
+            },
+            unsafe { AccessScope::new() },
+        ))
     }
 
-    pub fn init(&self) -> Result<(), ()> {
+    pub fn init(&self) -> EFResult<()> {
         let mut res = TockRv32iCInvokeRes::new();
 
-        self.execute(move || unsafe {
+        self.execute(|| unsafe {
             Self::foreign_runtime_init(
-                0,
+                self.rthdr_addr as usize,
                 0,
                 0,
                 0,
@@ -416,7 +419,22 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
             )
         });
 
-        unimplemented!()
+        res.encode_eferror()?;
+
+        // Function did not fault. Check whether it returned an error though:
+        if res.inner.a0 != 0 {
+            panic!("Function returned error: {:08x}", res.inner.a0);
+        }
+
+        // Function initialized successfully. If it provided us a non-zero value
+        // in a1, use that as the new stack pointer:
+        if res.inner.a1 != 0 {
+            self.asm_state
+                .foreign_stack_ptr
+                .set(res.inner.a1 as *mut ());
+        }
+
+        Ok(EFCopy::new(()))
     }
 
     #[naked]
@@ -432,6 +450,8 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
     ) {
         core::arch::asm!(
             "
+              .global efrtinit
+              efrtinit:
                 // Load required parameters in non-argument registers and
                 // continue execution in the generic protection-domain
                 // switch routine:
@@ -440,10 +460,10 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
                 mv   t2, a7                 // Load the InvokeRes pointer
                 li   t3, 0                  // Load the stack-spill immediate
                 la   t4, {invoke_sym}       // Load the generic_invoke function
-                j    t4                     // Tail-call into the invoke fn
+                jr   t4                     // Tail-call into the invoke fn
             ",
-                invoke_sym = sym Self::generic_invoke,
-                options(noreturn),
+            invoke_sym = sym Self::generic_invoke,
+            options(noreturn),
         );
     }
 
@@ -629,7 +649,7 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
                 // Aligning downward to the next 16-byte boundary cannot
                 // possibly underflow:
                 sub   s0, s0, t3    // fsp -= stack_spill
-                andi  s0, -16       // fsp -= fsp % 16
+                andi  s0, s0, -16   // fsp -= fsp % 16
 
                 // Just because the above operation did not wrap around does not
                 // mean that we did not overflow our stack. Check that we're not
@@ -947,12 +967,12 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
                 mret
 
             ",
-        // Function & springboard symbols:
+            // Function & springboard symbols:
             ret_springboard_sym = sym ef_tock_rv32i_c_rt_ret_springboard,
-        encode_ret_sym = sym Self::encode_return,
-        // Runtime ASM state offsets:
-        rtas_foreign_stack_ptr_offset = const std::mem::offset_of!(TockRv32iCRtAsmState, foreign_stack_ptr),
-            rtas_foreign_stack_bottom_offset = const std::mem::offset_of!(TockRv32iCRtAsmState, foreign_stack_bottom),
+            encode_ret_sym = sym Self::encode_return,
+            // Runtime ASM state offsets:
+            rtas_foreign_stack_ptr_offset = const core::mem::offset_of!(TockRv32iCRtAsmState, foreign_stack_ptr),
+            rtas_foreign_stack_bottom_offset = const core::mem::offset_of!(TockRv32iCRtAsmState, foreign_stack_bottom),
             options(noreturn),
         );
     }
@@ -967,10 +987,36 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
         a6_mtval: usize,
         a7_mepc: usize,
     ) {
-        panic!(
-            "Encode return: {:08x} {:08x} {:p} {:p} {:p} {:08x} {:08x} {:08x}",
-            a0, a1, a2_rt, a3_invoke_res, a4_fsp, a5_mcause, a6_mtval, a7_mepc,
-        );
+        const MCAUSE_INSTRUCTION_ACCESS_FAULT: usize = 1;
+        const MCAUSE_ILLEGAL_INSTRUCTION: usize = 2;
+        const MCAUSE_ENV_CALL_UMODE: usize = 8;
+
+        // Determine whether the function faulted, returned to the kernel using
+        // a regular `ecall` instruction, or tried to return, or tried to issue
+        // a callback.
+        if a5_mcause == MCAUSE_ENV_CALL_UMODE
+            || (a5_mcause == MCAUSE_INSTRUCTION_ACCESS_FAULT
+                && a7_mepc == ef_tock_rv32i_c_rt_ret_springboard as usize)
+        {
+            // Function returned "normally", so we encode that:
+            a3_invoke_res.error = TockRv32iCInvokeErr::NoError;
+            a3_invoke_res.a0 = a0;
+            a3_invoke_res.a1 = a1;
+            a3_invoke_res.sp = a4_fsp;
+        } else if a5_mcause == MCAUSE_ILLEGAL_INSTRUCTION
+            && a7_mepc == ef_tock_rv32i_c_rt_cb_springboard as usize
+        {
+            unimplemented!(
+		"Function attempted to perform a callback: {:08x} {:08x} {:p} {:p} {:p} {:08x} {:08x} {:08x}",
+		a0, a1, a2_rt, a3_invoke_res, a4_fsp, a5_mcause, a6_mtval, a7_mepc,
+	    );
+        } else {
+            // TODO: encode proper error here!
+            panic!(
+                "Function faulted: {:08x} {:08x} {:p} {:p} {:p} {:08x} {:08x} {:08x}",
+                a0, a1, a2_rt, a3_invoke_res, a4_fsp, a5_mcause, a6_mtval, a7_mepc,
+            );
+        }
     }
 }
 
@@ -986,22 +1032,36 @@ unsafe impl<ID: EFID, M: MPU + 'static> EncapfnRt for TockRv32iCRt<ID, M> {
     fn resolve_symbols<const SYMTAB_SIZE: usize, const FIXED_OFFSET_SYMTAB_SIZE: usize>(
         &self,
         _symbol_table: &'static [&'static CStr; SYMTAB_SIZE],
-        _fixed_offset_symbol_table: &'static [Option<&'static CStr>; FIXED_OFFSET_SYMTAB_SIZE],
+        fixed_offset_symbol_table: &'static [Option<&'static CStr>; FIXED_OFFSET_SYMTAB_SIZE],
     ) -> Option<Self::SymbolTableState<SYMTAB_SIZE, FIXED_OFFSET_SYMTAB_SIZE>> {
-        // TODO: check whether the binary's symbol table is large enough to
-        // contain all symbols that could possbily be referenced by the fixed
-        // offset symbol table (i.e., binary symtab size >=
-        // FIXED_OFFSET_SYMTAB_SIZE).
-        Some(())
+        // Check whether the binary's symbol table is large enough to contain
+        // all symbols that could possbily be referenced by the fixed offset
+        // symbol table (i.e., binary symtab size >= FIXED_OFFSET_SYMTAB_SIZE),
+        // and that all symbols are contained in the binary (TODO!).
+        if fixed_offset_symbol_table.len() > self.fntab_length {
+            None
+        } else {
+            Some(())
+        }
     }
 
     fn lookup_symbol<const SYMTAB_SIZE: usize, const FIXED_OFFSET_SYMTAB_SIZE: usize>(
         &self,
-        _index: usize,
+        index: usize,
         _symtabstate: &Self::SymbolTableState<SYMTAB_SIZE, FIXED_OFFSET_SYMTAB_SIZE>,
     ) -> Option<*const ()> {
-        // TODO: actually look up symbol
-        None
+        Some(unsafe { *(self.fntab_addr as *const *const ()).add(index) })
+    }
+
+    fn execute<R, F: FnOnce() -> R>(&self, f: F) -> R {
+        self.mpu.configure_mpu(&self.mpu_config);
+        self.mpu.enable_app_mpu();
+
+        let res = f();
+
+        self.mpu.disable_app_mpu();
+
+        res
     }
 
     // We provide only the required implementations and rely on default
@@ -1009,13 +1069,43 @@ unsafe impl<ID: EFID, M: MPU + 'static> EncapfnRt for TockRv32iCRt<ID, M> {
     // efficient as it gets in our case anyways.
     fn allocate_stacked_untracked_mut<F, R>(
         &self,
-        _requested_layout: core::alloc::Layout,
-        _fun: F,
+        requested_layout: core::alloc::Layout,
+        fun: F,
     ) -> Result<R, EFError>
     where
         F: FnOnce(*mut u8) -> R,
     {
-        unimplemented!()
+        let mut fsp = self.asm_state.foreign_stack_ptr.get() as usize;
+        let original_fsp = fsp;
+
+        // Move the stack pointer downward by the requested size. We always use
+        // saturating_sub() to avoid underflows:
+        fsp = fsp.saturating_sub(requested_layout.size());
+
+        // Now, adjust the foreign stack pointer downward to the required
+        // alignment. The saturating_sub should be optimized away here:
+        fsp = fsp.saturating_sub(original_fsp % requested_layout.align());
+
+        // Check that we did not produce a stack overflow. If that happened, we
+        // must return before saving this stack pointer, or writing to the
+        // pointer.
+        if fsp < self.asm_state.foreign_stack_bottom as usize {
+            return Err(EFError::AllocNoMem);
+        }
+
+        // Save the new stack pointer:
+        self.asm_state.foreign_stack_ptr.set(fsp as *mut ());
+
+        // Call the closure with our pointer:
+        let res = fun(fsp as *mut u8);
+
+        // Finally, restore the previous stack pointer:
+        self.asm_state
+            .foreign_stack_ptr
+            .set(original_fsp as *mut ());
+
+        // Fin:
+        Ok(res)
     }
 
     fn allocate_stacked_mut<F, R>(
@@ -1052,7 +1142,7 @@ macro_rules! invoke_impl_rtloc_register {
                     mv   t2, ", $resptrloc, "   // Load the InvokeRes pointer
                     li   t3, 0                  // Load the stack-spill immediate
                     la   t4, {invoke_sym}       // Load the generic_invoke function
-                    j    t4                     // Tail-call into the invoke fn
+                    jr   t4                     // Tail-call into the invoke fn
                     "),
                     invoke_sym = sym Self::generic_invoke,
                     options(noreturn),
@@ -1082,7 +1172,7 @@ impl<ID: EFID, M: MPU + 'static> Rv32iCRt<0, AREG6<Rv32iCABI>> for TockRv32iCRt<
             lw   t2, 0*4(sp)            // Load the InvokeRes pointer
             li   t3, 0                  // Load the stack-spill immediate
             la   t4, {invoke_sym}       // Load the generic_invoke function
-            j    t4                     // Tail-call into the invoke fn
+            jr   t4                     // Tail-call into the invoke fn
             "),
              invoke_sym = sym Self::generic_invoke,
              options(noreturn),
@@ -1103,7 +1193,7 @@ impl<ID: EFID, M: MPU + 'static> Rv32iCRt<0, AREG7<Rv32iCABI>> for TockRv32iCRt<
             lw   t2, 4*4(sp)            // Load the InvokeRes pointer
             li   t3, 0                  // Load the stack-spill immediate
             la   t4, {invoke_sym}       // Load the generic_invoke function
-            j    t4                     // Tail-call into the invoke fn
+            jr   t4                     // Tail-call into the invoke fn
             "),
              invoke_sym = sym Self::generic_invoke,
              options(noreturn),
@@ -1126,7 +1216,7 @@ impl<const STACK_SPILL: usize, const RT_STACK_OFFSET: usize, ID: EFID, M: MPU + 
             lw   t2, ({rt_off} + 8)(sp) // Load the InvokeRes pointer
             li   t3, {stack_spill}      // Copy the stack-spill immediate
             la   t4, {invoke_sym}       // Load the generic_invoke function
-            j    t4                     // Tail-call into the invoke fn
+            jr   t4                     // Tail-call into the invoke fn
             ",
             stack_spill = const STACK_SPILL,
             rt_off = const RT_STACK_OFFSET,
