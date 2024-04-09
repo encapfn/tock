@@ -4,7 +4,8 @@
     naked_functions,
     asm_const,
     maybe_uninit_as_bytes,
-    maybe_uninit_write_slice
+    maybe_uninit_write_slice,
+    pointer_byte_offsets,
 )]
 #![allow(named_asm_labels)]
 
