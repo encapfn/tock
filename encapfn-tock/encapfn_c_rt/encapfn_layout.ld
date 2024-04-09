@@ -49,8 +49,6 @@ SECTIONS {
         LONG(SIZEOF(.bss));
         LONG(ADDR(.bss));
 
-        KEEP(*(encapfn_init))
-
         *(.text.*)
     } > FLASH
 

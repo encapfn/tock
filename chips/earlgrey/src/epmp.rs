@@ -785,18 +785,18 @@ impl<const HANDOVER_CONFIG_CHECK: bool, DBG: EPMPDebugConfig>
             .zip(self.shadow_user_pmpcfgs.iter())
             .enumerate()
         {
-            // The ePMP in MML mode does not support read-write-execute
-            // regions. If such a region is to be configured, abort. As this
-            // loop here only modifies the shadow state, we can simply abort and
-            // return an error. We don't make any promises about the ePMP state
-            // if the configuration files, but it is still being activated with
-            // `enable_user_pmp`:
-            if region.0.get()
-                == <TORUserPMPCFG as From<mpu::Permissions>>::from(
-                    mpu::Permissions::ReadWriteExecute,
-                )
-                .get()
-            {
+            if !DBG::DEBUG_ENABLE && (
+                region.0.get()
+                    == <TORUserPMPCFG as From<mpu::Permissions>>::from(
+                           mpu::Permissions::ReadWriteExecute,
+                       ).get()
+            ) {
+                // The ePMP in MML mode does not support read-write-execute
+                // regions. If such a region is to be configured, abort. As this
+                // loop here only modifies the shadow state, we can simply abort and
+                // return an error. We don't make any promises about the ePMP state
+                // if the configuration files, but it is still being activated with
+                // `enable_user_pmp`:
                 return Err(());
             }
 

@@ -23,6 +23,7 @@
  * NULL if the top of the assigned memory region shall be used.
  */
 
+.section .encapfn_init
 .globl encapfn_init
 encapfn_init:
         /* Make sure all of the provided parameters are word-aligned: */

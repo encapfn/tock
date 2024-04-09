@@ -283,6 +283,7 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
         // Make sure we have at least enough data to parse the header:
         if binary.binary_length < ENCAPFN_HEADER_WLEN * core::mem::size_of::<u32>() {
             // TODO: more descriptive error
+            panic!("Error1");
             return Err(EFError::InternalError);
         }
 
@@ -300,6 +301,7 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
 
         // Read the header fields in native endianness. First, check the magic:
         if header_slice[ENCAPFN_HEADER_MAGIC_WOFFSET] != ENCAPFN_HEADER_MAGIC {
+            panic!("Error2");
             return Err(EFError::InternalError);
         }
 
@@ -308,6 +310,7 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
         let rthdr_offset = header_slice[ENCAPFN_HEADER_RTHDR_PTR_WOFFSET] as usize;
         if rthdr_offset > binary.binary_length - core::mem::size_of::<u32>() {
             // TODO: more descriptive error
+            panic!("Error3");
             return Err(EFError::InternalError);
         }
         let rthdr_addr = unsafe { binary.binary_start.byte_add(rthdr_offset) };
@@ -317,6 +320,7 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
         // contained in contained within the binary:
         let init_offset = header_slice[ENCAPFN_HEADER_INIT_PTR_WOFFSET] as usize;
         if init_offset > binary.binary_length - core::mem::size_of::<u32>() {
+            panic!("Error4 0x{:08x} 0x{:08x}", init_offset, binary.binary_length);
             return Err(EFError::InternalError);
         }
 
@@ -332,6 +336,7 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
         if fntab_offset + (fntab_length * core::mem::size_of::<*const ()>())
             > binary.binary_length - core::mem::size_of::<u32>()
         {
+            panic!("Error5");
             return Err(EFError::InternalError);
         }
         let fntab_addr = unsafe { binary.binary_start.byte_add(fntab_offset) };
@@ -339,7 +344,10 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
 
         // Create an MPU configuration that sets up appropriate permissions for
         // the Encapsulated Functions binary:
-        let mut mpu_config = mpu.new_config().ok_or(EFError::InternalError)?;
+        let mut mpu_config = mpu.new_config().ok_or_else(|| {
+            panic!("Error6");
+            EFError::InternalError
+        })?;
 
         mpu.allocate_region(
             binary.binary_start as *const u8,
@@ -354,6 +362,27 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
             ram_region_start as *mut u8 as *const _,
             ram_region_length,
             ram_region_length,
+            mpu::Permissions::ReadWriteOnly,
+            &mut mpu_config,
+        )
+        .unwrap();
+      
+
+        // OpenTitan RVDM
+        mpu.allocate_region(
+            0x00010000 as *mut u8 as *const _,
+            0x00001000,
+            0x00001000,
+            mpu::Permissions::ReadWriteExecute,
+            &mut mpu_config,
+        )
+        .unwrap();
+
+        // OpenTitan MMIO
+        mpu.allocate_region(
+            0x40000000 as *mut u8 as *const _,
+            0x10000000,
+            0x10000000,
             mpu::Permissions::ReadWriteOnly,
             &mut mpu_config,
         )
@@ -426,13 +455,11 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
             panic!("Function returned error: {:08x}", res.inner.a0);
         }
 
-        // Function initialized successfully. If it provided us a non-zero value
-        // in a1, use that as the new stack pointer:
-        if res.inner.a1 != 0 {
-            self.asm_state
-                .foreign_stack_ptr
-                .set(res.inner.a1 as *mut ());
-        }
+        // Function initialized successfully. It provides us with a new stack pointer that we are
+        // supposed to use for all subsequent invocations.
+        self.asm_state
+            .foreign_stack_ptr
+            .set(res.inner.sp as *mut ());
 
         Ok(EFCopy::new(()))
     }
@@ -459,6 +486,7 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
                 mv   t1, a6                 // Load function pointer
                 mv   t2, a7                 // Load the InvokeRes pointer
                 li   t3, 0                  // Load the stack-spill immediate
+                li   t5, -1                 // Load a marker indicating the source of this call
                 la   t4, {invoke_sym}       // Load the generic_invoke function
                 jr   t4                     // Tail-call into the invoke fn
             ",
@@ -654,7 +682,8 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
                 // Just because the above operation did not wrap around does not
                 // mean that we did not overflow our stack. Check that we're not
                 // lower than stack_bottom:
-                bge   s0, s1, 300f  // If fsp >= stack_bottom, no overflow!
+                bgeu  s0, s1, 300f  // If fsp >= stack_bottom, no overflow!
+                unimp
 
               200: // _spill_stack_overflow
                 unimp               // TODO: error handling!
@@ -1132,7 +1161,7 @@ unsafe impl<ID: EFID, M: MPU + 'static> EncapfnRt for TockRv32iCRt<ID, M> {
 }
 
 macro_rules! invoke_impl_rtloc_register {
-    ($regtype:ident, $rtloc:expr, $fnptrloc:expr, $resptrloc:expr) => {
+    ($regtype:ident, $rtloc:expr, $fnptrloc:expr, $resptrloc:expr, $marker:expr) => {
         impl<ID: EFID, M: MPU + 'static> Rv32iCRt<0, $regtype<Rv32iCABI>> for TockRv32iCRt<ID, M> {
             #[naked]
             unsafe extern "C" fn invoke() {
@@ -1145,6 +1174,7 @@ macro_rules! invoke_impl_rtloc_register {
                     mv   t1, ", $fnptrloc, "    // Load function pointer
                     mv   t2, ", $resptrloc, "   // Load the InvokeRes pointer
                     li   t3, 0                  // Load the stack-spill immediate
+                    li   t5, ", $marker, "      // Load a marker indicating the source of this call
                     la   t4, {invoke_sym}       // Load the generic_invoke function
                     jr   t4                     // Tail-call into the invoke fn
                     "),
@@ -1156,12 +1186,12 @@ macro_rules! invoke_impl_rtloc_register {
     };
 }
 
-invoke_impl_rtloc_register!(AREG0, "a0", "a1", "a2");
-invoke_impl_rtloc_register!(AREG1, "a1", "a2", "a3");
-invoke_impl_rtloc_register!(AREG2, "a2", "a3", "a4");
-invoke_impl_rtloc_register!(AREG3, "a3", "a4", "a4");
-invoke_impl_rtloc_register!(AREG4, "a4", "a5", "a6");
-invoke_impl_rtloc_register!(AREG5, "a5", "a6", "a7");
+invoke_impl_rtloc_register!(AREG0, "a0", "a1", "a2", "0");
+invoke_impl_rtloc_register!(AREG1, "a1", "a2", "a3", "1");
+invoke_impl_rtloc_register!(AREG2, "a2", "a3", "a4", "2");
+invoke_impl_rtloc_register!(AREG3, "a3", "a4", "a5", "3");
+invoke_impl_rtloc_register!(AREG4, "a4", "a5", "a6", "4");
+invoke_impl_rtloc_register!(AREG5, "a5", "a6", "a7", "5");
 
 impl<ID: EFID, M: MPU + 'static> Rv32iCRt<0, AREG6<Rv32iCABI>> for TockRv32iCRt<ID, M> {
     #[naked]
@@ -1175,6 +1205,7 @@ impl<ID: EFID, M: MPU + 'static> Rv32iCRt<0, AREG6<Rv32iCABI>> for TockRv32iCRt<
             mv   t1, a7                 // Load function pointer
             lw   t2, 0*4(sp)            // Load the InvokeRes pointer
             li   t3, 0                  // Load the stack-spill immediate
+            li   t5, 6                  // Load a marker indicating the source of this call
             la   t4, {invoke_sym}       // Load the generic_invoke function
             jr   t4                     // Tail-call into the invoke fn
             "),
@@ -1196,6 +1227,7 @@ impl<ID: EFID, M: MPU + 'static> Rv32iCRt<0, AREG7<Rv32iCABI>> for TockRv32iCRt<
             mv   t1, 0*4(sp)            // Load function pointer
             lw   t2, 4*4(sp)            // Load the InvokeRes pointer
             li   t3, 0                  // Load the stack-spill immediate
+            li   t5, 7                  // Load a marker indicating the source of this call
             la   t4, {invoke_sym}       // Load the generic_invoke function
             jr   t4                     // Tail-call into the invoke fn
             "),
@@ -1219,6 +1251,7 @@ impl<const STACK_SPILL: usize, const RT_STACK_OFFSET: usize, ID: EFID, M: MPU + 
             mv   t1, ({rt_off} + 4)(sp) // Load function pointer
             lw   t2, ({rt_off} + 8)(sp) // Load the InvokeRes pointer
             li   t3, {stack_spill}      // Copy the stack-spill immediate
+            li   t5, 8                  // Load a marker indicating the source of this call
             la   t4, {invoke_sym}       // Load the generic_invoke function
             jr   t4                     // Tail-call into the invoke fn
             ",
