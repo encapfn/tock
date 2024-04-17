@@ -989,11 +989,13 @@ impl<const HANDOVER_CONFIG_CHECK: bool> TORUserPMP<{ TOR_USER_REGIONS_DEBUG_ENAB
         &self,
         regions: &[(TORUserPMPCFG, *const u8, *const u8); TOR_USER_REGIONS_DEBUG_ENABLE],
     ) -> Result<(), ()> {
-        self.user_configure_pmp::<TOR_USER_REGIONS_DEBUG_ENABLE>(regions)
+        self.user_configure_pmp::<TOR_USER_REGIONS_DEBUG_ENABLE>(regions)?;
+        self.user_enable_user_pmp()
     }
 
     fn enable_user_pmp(&self) -> Result<(), ()> {
-        self.user_enable_user_pmp()
+        //self.user_enable_user_pmp()
+        Ok(())
     }
 
     fn disable_user_pmp(&self) {
@@ -1001,7 +1003,7 @@ impl<const HANDOVER_CONFIG_CHECK: bool> TORUserPMP<{ TOR_USER_REGIONS_DEBUG_ENAB
         // the debug-mode ePMP, as machine-mode lockdown (MML) is not enabled.
         // However, we still execercise these routines to stay as close to the
         // non-debug ePMP configuration as possible:
-        self.user_disable_user_pmp()
+        //self.user_disable_user_pmp()
     }
 }
 

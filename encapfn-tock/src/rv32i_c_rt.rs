@@ -349,41 +349,51 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
             EFError::InternalError
         })?;
 
-        mpu.allocate_region(
-            binary.binary_start as *const u8,
-            binary.binary_length,
-            binary.binary_length,
-            mpu::Permissions::ReadExecuteOnly,
-            &mut mpu_config,
-        )
-        .unwrap();
+        //mpu.allocate_region(
+        //    binary.binary_start as *const u8,
+        //    binary.binary_length,
+        //    binary.binary_length,
+        //    mpu::Permissions::ReadExecuteOnly,
+        //    &mut mpu_config,
+        //)
+        //.unwrap();
 
-        mpu.allocate_region(
-            ram_region_start as *mut u8 as *const _,
-            ram_region_length,
-            ram_region_length,
-            mpu::Permissions::ReadWriteOnly,
-            &mut mpu_config,
-        )
-        .unwrap();
+        //mpu.allocate_region(
+        //    ram_region_start as *mut u8 as *const _,
+        //    ram_region_length,
+        //    ram_region_length,
+        //    mpu::Permissions::ReadWriteOnly,
+        //    &mut mpu_config,
+        //)
+        //.unwrap();
       
 
-        // OpenTitan RVDM
-        mpu.allocate_region(
-            0x00010000 as *mut u8 as *const _,
-            0x00001000,
-            0x00001000,
-            mpu::Permissions::ReadWriteExecute,
-            &mut mpu_config,
-        )
-        .unwrap();
+        //// OpenTitan RVDM
+        //mpu.allocate_region(
+        //    0x00010000 as *mut u8 as *const _,
+        //    0x00001000,
+        //    0x00001000,
+        //    mpu::Permissions::ReadWriteExecute,
+        //    &mut mpu_config,
+        //)
+        //.unwrap();
 
-        // OpenTitan MMIO
+        //// OpenTitan MMIO
+        //mpu.allocate_region(
+        //    0x40000000 as *mut u8 as *const _,
+        //    0x10000000,
+        //    0x10000000,
+        //    mpu::Permissions::ReadWriteOnly,
+        //    &mut mpu_config,
+        //)
+        //.unwrap();
+
+        // Test, making all memory accessible
         mpu.allocate_region(
-            0x40000000 as *mut u8 as *const _,
-            0x10000000,
-            0x10000000,
-            mpu::Permissions::ReadWriteOnly,
+            0x00000000 as *mut u8 as *const _,
+            0x80000000,
+            0x80000000,
+            mpu::Permissions::ReadWriteExecute,
             &mut mpu_config,
         )
         .unwrap();
@@ -771,27 +781,27 @@ impl<ID: EFID, M: MPU + 'static> TockRv32iCRt<ID, M> {
                 // to. This is not strictly necessary under all threat models,
                 // but it's a good way to test that we're actually restoring all
                 // of them:
-                mv    x3, x0        // gp
-                mv    x4, x0        // tp
-                mv    x5, x0        // t0
-                mv    x6, x0        // t1
-                mv    x7, x0        // t2
-                mv    x8, x0        // s0 / fp
-                mv    x9, x0        // s1
-                mv   x18, x0        // s2
-                mv   x19, x0        // s3
-                mv   x20, x0        // s4
-                mv   x21, x0        // s5
-                mv   x22, x0        // s6
-                mv   x23, x0        // s7
-                mv   x24, x0        // s8
-                mv   x25, x0        // s9
-                mv   x26, x0        // s10
-                mv   x27, x0        // s11
-                mv   x28, x0        // t3
-                mv   x29, x0        // t4
-                mv   x30, x0        // t5
-                mv   x31, x0        // t6
+                //mv    x3, x0        // gp
+                //mv    x4, x0        // tp
+                //mv    x5, x0        // t0
+                //mv    x6, x0        // t1
+                //mv    x7, x0        // t2
+                //mv    x8, x0        // s0 / fp
+                //mv    x9, x0        // s1
+                //mv   x18, x0        // s2
+                //mv   x19, x0        // s3
+                //mv   x20, x0        // s4
+                //mv   x21, x0        // s5
+                //mv   x22, x0        // s6
+                //mv   x23, x0        // s7
+                //mv   x24, x0        // s8
+                //mv   x25, x0        // s9
+                //mv   x26, x0        // s10
+                //mv   x27, x0        // s11
+                //mv   x28, x0        // t3
+                //mv   x29, x0        // t4
+                //mv   x30, x0        // t5
+                //mv   x31, x0        // t6
 
                 // Execute the foreign function, re-enabling interrupts.
                 mret
@@ -1248,7 +1258,7 @@ impl<const STACK_SPILL: usize, const RT_STACK_OFFSET: usize, ID: EFID, M: MPU + 
             // continue execution in the generic protection-domain
             // switch routine:
             lw   t0, ({rt_off} + 0)(sp) // Load runtime pointer
-            mv   t1, ({rt_off} + 4)(sp) // Load function pointer
+            lw   t1, ({rt_off} + 4)(sp) // Load function pointer
             lw   t2, ({rt_off} + 8)(sp) // Load the InvokeRes pointer
             li   t3, {stack_spill}      // Copy the stack-spill immediate
             li   t5, 8                  // Load a marker indicating the source of this call

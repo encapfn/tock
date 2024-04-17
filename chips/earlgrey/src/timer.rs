@@ -79,7 +79,7 @@ impl<'a, CFG: EarlGreyConfig> RvTimer<'a, CFG> {
     }
 
     pub fn setup(&self) {
-        let prescale: u16 = ((CFG::CPU_FREQ / 10_000) - 1) as u16; // 10Khz
+        let prescale: u16 = ((CFG::PERIPHERAL_FREQ / 10_000) - 1) as u16; // 10Khz
 
         let regs = self.registers;
         // Set proper prescaler and the like

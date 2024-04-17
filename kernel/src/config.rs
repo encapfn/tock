@@ -89,8 +89,8 @@ pub(crate) struct Config {
 /// Cargo features.
 pub(crate) const CONFIG: Config = Config {
     trace_syscalls: cfg!(feature = "trace_syscalls"),
-    // debug_load_processes: cfg!(feature = "debug_load_processes"),
-    debug_load_processes: true,
+    debug_load_processes: cfg!(feature = "debug_load_processes"),
+    //debug_load_processes: true,
     debug_panics: !cfg!(feature = "no_debug_panics"),
     debug_process_credentials: cfg!(feature = "debug_process_credentials"),
 };
