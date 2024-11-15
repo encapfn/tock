@@ -10,7 +10,6 @@
 #![cfg_attr(not(doc), no_main)]
 
 use core::ptr::addr_of;
-use core::ptr::addr_of_mut;
 
 use capsules_core::virtualizers::virtual_alarm::{MuxAlarm, VirtualMuxAlarm};
 use kernel::capabilities;
@@ -31,7 +30,7 @@ pub const NUM_PROCS: usize = 4;
 
 // Actual memory for holding the active process structures. Need an empty list
 // at least.
-static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS] =
+pub static mut PROCESSES: [Option<&'static dyn kernel::process::Process>; NUM_PROCS] =
     [None; NUM_PROCS];
 
 // Reference to the chip for panic dumps.
@@ -41,10 +40,6 @@ static mut CHIP: Option<&'static QemuRv32VirtChip<QemuRv32VirtDefaultPeripherals
 static mut PROCESS_PRINTER: Option<&'static capsules_system::process_printer::ProcessPrinterText> =
     None;
 
-// How should the kernel respond when a process faults.
-const FAULT_RESPONSE: capsules_system::process_policies::PanicFaultPolicy =
-    capsules_system::process_policies::PanicFaultPolicy {};
-
 /// Dummy buffer that causes the linker to reserve enough space for the stack.
 #[no_mangle]
 #[link_section = ".stack_buffer"]
@@ -52,7 +47,7 @@ pub static mut STACK_MEMORY: [u8; 0x8000] = [0; 0x8000];
 
 /// A structure representing this platform that holds references to all
 /// capsules for this platform. We've included an alarm and console.
-struct QemuRv32VirtPlatform {
+pub struct QemuRv32VirtPlatform {
     pconsole: &'static capsules_core::process_console::ProcessConsole<
         'static,
         { capsules_core::process_console::DEFAULT_COMMAND_HISTORY_LEN },
@@ -71,7 +66,8 @@ struct QemuRv32VirtPlatform {
         'static,
         VirtualMuxAlarm<'static, qemu_rv32_virt_chip::chip::QemuRv32VirtClint<'static>>,
     >,
-    ipc: kernel::ipc::IPC<{ NUM_PROCS as u8 }>,
+    /// The IPC driver.
+    pub ipc: kernel::ipc::IPC<{ NUM_PROCS as u8 }>,
     scheduler: &'static CooperativeSched<'static>,
     scheduler_timer: &'static VirtualSchedulerTimer<
         VirtualMuxAlarm<'static, qemu_rv32_virt_chip::chip::QemuRv32VirtClint<'static>>,
@@ -152,24 +148,9 @@ impl
 /// removed when this function returns. Otherwise, the stack space used for
 /// these static_inits is wasted.
 #[inline(never)]
-unsafe fn start() -> (
-    &'static kernel::Kernel,
-    QemuRv32VirtPlatform,
-    &'static qemu_rv32_virt_chip::chip::QemuRv32VirtChip<
-        'static,
-        QemuRv32VirtDefaultPeripherals<'static>,
-    >,
-) {
+pub unsafe fn start() -> (&'static kernel::Kernel, QemuRv32VirtPlatform, &'static QemuRv32VirtChip<'static, QemuRv32VirtDefaultPeripherals<'static>>, &'static QemuRv32VirtDefaultPeripherals<'static>) {
     // These symbols are defined in the linker script.
     extern "C" {
-        /// Beginning of the ROM region containing app images.
-        static _sapps: u8;
-        /// End of the ROM region containing app images.
-        static _eapps: u8;
-        /// Beginning of the RAM region for app memory.
-        static mut _sappmem: u8;
-        /// End of the RAM region for app memory.
-        static _eappmem: u8;
         /// The start of the kernel text (Included only for kernel PMP)
         static _stext: u8;
         /// The end of the kernel text (Included only for kernel PMP)
@@ -225,7 +206,6 @@ unsafe fn start() -> (
     .unwrap();
 
     // Acquire required capabilities
-    let process_mgmt_cap = create_capability!(capabilities::ProcessManagementCapability);
     let memory_allocation_cap = create_capability!(capabilities::MemoryAllocationCapability);
 
     // Create a board kernel instance
@@ -541,36 +521,5 @@ unsafe fn start() -> (
     debug!("QEMU RISC-V 32-bit \"virt\" machine, initialization complete.");
     debug!("Entering main loop.");
 
-    // ---------- PROCESS LOADING, SCHEDULER LOOP ----------
-
-    kernel::process::load_processes(
-        board_kernel,
-        chip,
-        core::slice::from_raw_parts(
-            core::ptr::addr_of!(_sapps),
-            core::ptr::addr_of!(_eapps) as usize - core::ptr::addr_of!(_sapps) as usize,
-        ),
-        core::slice::from_raw_parts_mut(
-            core::ptr::addr_of_mut!(_sappmem),
-            core::ptr::addr_of!(_eappmem) as usize - core::ptr::addr_of!(_sappmem) as usize,
-        ),
-        &mut *addr_of_mut!(PROCESSES),
-        &FAULT_RESPONSE,
-        &process_mgmt_cap,
-    )
-    .unwrap_or_else(|err| {
-        debug!("Error loading processes!");
-        debug!("{:?}", err);
-    });
-
-    (board_kernel, platform, chip)
-}
-
-/// Main function called after RAM initialized.
-#[no_mangle]
-pub unsafe fn main() {
-    let main_loop_capability = create_capability!(capabilities::MainLoopCapability);
-
-    let (board_kernel, platform, chip) = start();
-    board_kernel.kernel_loop(&platform, chip, Some(&platform.ipc), &main_loop_capability);
+    (board_kernel, platform, chip, peripherals)
 }
