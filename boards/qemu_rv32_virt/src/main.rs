@@ -34,9 +34,7 @@ pub unsafe fn main() {
         static _eappmem: u8;
     }
 
-
-    let (board_kernel, platform, chip, _default_peripherals) =
-        qemu_rv32_virt_lib::start();
+    let (board_kernel, platform, chip, _default_peripherals) = qemu_rv32_virt_lib::start();
 
     // Acquire required capabilities
     let process_mgmt_capability = create_capability!(capabilities::ProcessManagementCapability);

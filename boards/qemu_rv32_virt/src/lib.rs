@@ -148,7 +148,12 @@ impl
 /// removed when this function returns. Otherwise, the stack space used for
 /// these static_inits is wasted.
 #[inline(never)]
-pub unsafe fn start() -> (&'static kernel::Kernel, QemuRv32VirtPlatform, &'static QemuRv32VirtChip<'static, QemuRv32VirtDefaultPeripherals<'static>>, &'static QemuRv32VirtDefaultPeripherals<'static>) {
+pub unsafe fn start() -> (
+    &'static kernel::Kernel,
+    QemuRv32VirtPlatform,
+    &'static QemuRv32VirtChip<'static, QemuRv32VirtDefaultPeripherals<'static>>,
+    &'static QemuRv32VirtDefaultPeripherals<'static>,
+) {
     // These symbols are defined in the linker script.
     extern "C" {
         /// The start of the kernel text (Included only for kernel PMP)
