@@ -117,7 +117,7 @@ static mut PLATFORM: Option<&'static EarlGrey> = None;
 #[cfg(test)]
 static mut MAIN_CAP: Option<&dyn kernel::capabilities::MainLoopCapability> = None;
 // Test access to alarm
-static mut ALARM: Option<
+pub static mut ALARM: Option<
     &'static MuxAlarm<'static, earlgrey::timer::RvTimer<'static, ChipConfig>>,
 > = None;
 // Test access to TicKV
