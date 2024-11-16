@@ -7,12 +7,6 @@
 //! - <https://opentitan.org/>
 
 #![no_std]
-// Disable this attribute when documenting, as a workaround for
-// https://github.com/rust-lang/rust/issues/62184.
-#![cfg_attr(not(doc), no_main)]
-#![feature(custom_test_frameworks)]
-#![test_runner(test_runner)]
-#![reexport_test_harness_main = "test_main"]
 
 use crate::hil::symmetric_encryption::AES128_BLOCK_SIZE;
 use crate::otbn::OtbnComponent;
@@ -169,7 +163,7 @@ pub static mut STACK_MEMORY: [u8; 0x1400] = [0; 0x1400];
 
 /// A structure representing this platform that holds references to all
 /// capsules for this platform. We've included an alarm and console.
-struct EarlGrey {
+pub struct EarlGrey {
     led: &'static capsules_core::led::LedDriver<
         'static,
         LedHigh<'static, earlgrey::gpio::GpioPin<'static, earlgrey::pinmux::PadConfig>>,
@@ -296,7 +290,7 @@ impl KernelResources<EarlGreyChip> for EarlGrey {
     }
 }
 
-unsafe fn setup() -> (
+pub unsafe fn start() -> (
     &'static kernel::Kernel,
     &'static EarlGrey,
     &'static EarlGreyChip,
@@ -882,25 +876,6 @@ unsafe fn setup() -> (
     debug!("OpenTitan initialisation complete. Entering main loop");
 
     (board_kernel, earlgrey, chip, peripherals)
-}
-
-/// Main function.
-///
-/// This function is called from the arch crate after some very basic RISC-V
-/// setup and RAM initialization.
-#[no_mangle]
-pub unsafe fn main() {
-    #[cfg(test)]
-    test_main();
-
-    #[cfg(not(test))]
-    {
-        let (board_kernel, earlgrey, chip, _peripherals) = setup();
-
-        let main_loop_cap = create_capability!(capabilities::MainLoopCapability);
-
-        board_kernel.kernel_loop(earlgrey, chip, None::<&kernel::ipc::IPC<0>>, &main_loop_cap);
-    }
 }
 
 #[cfg(test)]

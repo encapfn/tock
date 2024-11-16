@@ -3,19 +3,23 @@
 # Copyright Tock Contributors 2022.
 
 [package]
-name = "earlgrey-cw310"
+name = "earlgrey_board_lib"
 version.workspace = true
 authors.workspace = true
-build = "build.rs"
 edition.workspace = true
 
 [dependencies]
-earlgrey_board_lib = { path = "../earlgrey" }
+components = { path = "../../components" }
+rv32i = { path = "../../../arch/rv32i" }
 kernel = { path = "../../../kernel" }
+earlgrey = { path = "../../../chips/earlgrey" }
+lowrisc = { path = "../../../chips/lowrisc" }
+tock-tbf = { path = "../../../libraries/tock-tbf" }
 
-[build-dependencies]
-tock_build_scripts = { path = "../../build_scripts" }
-
+capsules-core = { path = "../../../capsules/core" }
+capsules-extra = { path = "../../../capsules/extra" }
+capsules-aes-gcm = { path = "../../../capsules/aes_gcm" }
+capsules-system = { path = "../../../capsules/system" }
 
 [features]
 default = ["fpga_cw310"]
@@ -32,11 +36,11 @@ default = ["fpga_cw310"]
 #
 #    - sim_verilator:
 #      OpenTitan SoC design simulated in Verilator.
-fpga_cw310 = ["earlgrey_board_lib/fpga_cw310"]
-sim_verilator = ["earlgrey_board_lib/sim_verilator"]
+fpga_cw310 = []
+sim_verilator = []
 # This is used to indicate that we should include tests that only pass on
 # hardware.
-hardware_tests = ["earlgrey_board_lib/hardware_tests"]
+hardware_tests = []
 
 [lints]
 workspace = true
