@@ -73,7 +73,7 @@ impl EarlGreyConfig for ChipConfig {
 
 // Whether to check for a proper ePMP handover configuration prior to ePMP
 // initialization:
-pub const EPMP_HANDOVER_CONFIG_CHECK: bool = false;
+// pub const EPMP_HANDOVER_CONFIG_CHECK: bool = false;
 
 // EarlGrey ePMP debug mode
 //
@@ -83,17 +83,19 @@ pub const EPMP_HANDOVER_CONFIG_CHECK: bool = false;
 // Either
 // - `earlgrey::epmp::EPMPDebugEnable`, or
 // - `earlgrey::epmp::EPMPDebugDisable`.
-pub type EPMPDebugConfig = earlgrey::epmp::EPMPDebugEnable;
+// pub type EPMPDebugConfig = earlgrey::epmp::EPMPDebugEnable;
 
 // EarlGrey Chip type signature, including generic PMP argument and peripherals
 // type:
+const MPU_REGIONS: usize = 7;
+const PMP_REGIONS: usize = 14;
 pub type EarlGreyChip = earlgrey::chip::EarlGrey<
     'static,
-    { <EPMPDebugConfig as earlgrey::epmp::EPMPDebugConfig>::TOR_USER_REGIONS },
+    { MPU_REGIONS },
     EarlGreyDefaultPeripherals<'static, ChipConfig, BoardPinmuxLayout>,
     ChipConfig,
     BoardPinmuxLayout,
-    earlgrey::epmp::EarlGreyEPMP<{ EPMP_HANDOVER_CONFIG_CHECK }, EPMPDebugConfig>,
+    rv32i::pmp::simple::SimplePMP<{ PMP_REGIONS }>,
 >;
 
 const NUM_PROCS: usize = 4;
@@ -328,48 +330,7 @@ pub unsafe fn start() -> (
     // Set up memory protection immediately after setting the trap handler, to
     // ensure that much of the board initialization routine runs with ePMP
     // protection.
-    let earlgrey_epmp = earlgrey::epmp::EarlGreyEPMP::new_debug(
-        earlgrey::epmp::FlashRegion(
-            rv32i::pmp::NAPOTRegionSpec::new(
-                core::ptr::addr_of!(_sflash),
-                core::ptr::addr_of!(_eflash) as usize - core::ptr::addr_of!(_sflash) as usize,
-            )
-            .unwrap(),
-        ),
-        earlgrey::epmp::RAMRegion(
-            rv32i::pmp::NAPOTRegionSpec::new(
-                core::ptr::addr_of!(_ssram),
-                core::ptr::addr_of!(_esram) as usize - core::ptr::addr_of!(_ssram) as usize,
-            )
-            .unwrap(),
-        ),
-        earlgrey::epmp::MMIORegion(
-            rv32i::pmp::NAPOTRegionSpec::new(
-                0x40000000 as *const u8, // start
-                0x10000000,              // size
-            )
-            .unwrap(),
-        ),
-        earlgrey::epmp::KernelTextRegion(
-            rv32i::pmp::TORRegionSpec::new(
-                core::ptr::addr_of!(_stext),
-                core::ptr::addr_of!(_etext),
-            )
-            .unwrap(),
-        ),
-        // RV Debug Manager memory region (required for JTAG debugging).
-        // This access can be disabled by changing the EarlGreyEPMP type
-        // parameter `EPMPDebugConfig` to `EPMPDebugDisable`, in which case
-        // this expects to be passed a unit (`()`) type.
-        earlgrey::epmp::RVDMRegion(
-            rv32i::pmp::NAPOTRegionSpec::new(
-                0x00010000 as *const u8, // start
-                0x00001000,              // size
-            )
-            .unwrap(),
-        ),
-    )
-    .unwrap();
+    let simple_pmp = rv32i::pmp::simple::SimplePMP::new().unwrap();
 
     // Configure board layout in pinmux
     BoardPinmuxLayout::setup();
@@ -481,7 +442,7 @@ pub unsafe fn start() -> (
 
     let chip = static_init!(
         EarlGreyChip,
-        earlgrey::chip::EarlGrey::new(peripherals, hardware_alarm, earlgrey_epmp)
+        earlgrey::chip::EarlGrey::new(peripherals, hardware_alarm, simple_pmp)
     );
     CHIP = Some(chip);
 

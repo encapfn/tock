@@ -178,37 +178,7 @@ pub unsafe fn start() -> (
     // Set up memory protection immediately after setting the trap handler, to
     // ensure that much of the board initialization routine runs with ePMP
     // protection.
-    let epmp = rv32i::pmp::kernel_protection_mml_epmp::KernelProtectionMMLEPMP::new(
-        rv32i::pmp::kernel_protection_mml_epmp::FlashRegion(
-            rv32i::pmp::NAPOTRegionSpec::new(
-                core::ptr::addr_of!(_sflash),
-                core::ptr::addr_of!(_eflash) as usize - core::ptr::addr_of!(_sflash) as usize,
-            )
-            .unwrap(),
-        ),
-        rv32i::pmp::kernel_protection_mml_epmp::RAMRegion(
-            rv32i::pmp::NAPOTRegionSpec::new(
-                core::ptr::addr_of!(_ssram),
-                core::ptr::addr_of!(_esram) as usize - core::ptr::addr_of!(_ssram) as usize,
-            )
-            .unwrap(),
-        ),
-        rv32i::pmp::kernel_protection_mml_epmp::MMIORegion(
-            rv32i::pmp::NAPOTRegionSpec::new(
-                core::ptr::null::<u8>(), // start
-                0x20000000,              // size
-            )
-            .unwrap(),
-        ),
-        rv32i::pmp::kernel_protection_mml_epmp::KernelTextRegion(
-            rv32i::pmp::TORRegionSpec::new(
-                core::ptr::addr_of!(_stext),
-                core::ptr::addr_of!(_etext),
-            )
-            .unwrap(),
-        ),
-    )
-    .unwrap();
+    let pmp = rv32i::pmp::simple::SimplePMP::new().unwrap();
 
     // Acquire required capabilities
     let memory_allocation_cap = create_capability!(capabilities::MemoryAllocationCapability);
@@ -444,7 +414,7 @@ pub unsafe fn start() -> (
 
     let chip = static_init!(
         QemuRv32VirtChip<QemuRv32VirtDefaultPeripherals>,
-        QemuRv32VirtChip::new(peripherals, hardware_timer, epmp),
+        QemuRv32VirtChip::new(peripherals, hardware_timer, pmp),
     );
     CHIP = Some(chip);
 
