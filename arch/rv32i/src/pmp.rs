@@ -562,6 +562,11 @@ impl<const MAX_REGIONS: usize, P: TORUserPMP<MAX_REGIONS> + 'static> PMPUserMPU<
             pmp,
         }
     }
+
+    // Method for benchmarking "cold" Encapsulated Functions invoke times:
+    pub fn request_reconfiguration(&self) {
+        self.last_configured_for.clear();
+    }
 }
 
 impl<const MAX_REGIONS: usize, P: TORUserPMP<MAX_REGIONS> + 'static> kernel::platform::mpu::MPU
